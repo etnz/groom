@@ -12,12 +12,13 @@ import (
 
 // Configuration Constants
 const (
-    // CurrentVersion const value is actually injected by the release process.
-	CurrentVersion = "v0.0.1"
 	ServiceName    = "Groom-Agent"
 )
-
-var Hostname string
+var(
+    // CurrentVersion const value is actually injected by the release process.
+	CurrentVersion = "v0.0.1"
+    // Hostname is set at init using the localhost name.
+ Hostname string
 
 func init() {
 	var err error
@@ -53,6 +54,7 @@ func startAdvertising(ctx context.Context) (stop func()){
 		Name:   Hostname,
 		Type:   "_groom._tcp",
 		Domain: "local",
+        Port: 80,
 		Text: map[string]string{
 			"version": CurrentVersion,
 			"status":  "idle",
