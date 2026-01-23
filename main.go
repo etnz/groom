@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 
@@ -33,29 +32,42 @@ func init() {
 	}
 }
 
+// temporary as global, the current goal is to have something that works for self update
+// THEN and only then we'll refactor this code.
+var ctx context.Context
+var cancel func()
+var responder dnssd.Responder
+var handle dnssd.ServiceHandle
+var sig chan os.Signal
+
 func main() {
 	log.Printf("👲 Groom %s starting on %s...", CurrentVersion, Hostname)
 
 	// Create a context to control the loop
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel = context.WithCancel(context.Background())
 
 	// Start mDNS Responder (Advertising)
-	stopAdvertising := startAdvertising(ctx)
+	startAdvertising(ctx)
 	watchForConcierge(ctx)
 
 	// Block until Shutdown Signal
-	sig := make(chan os.Signal, 1)
+	sig = make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
 	log.Println("👋 Shutdown signal received. Goodbye.")
+	shutdown()
+}
 
-	stopAdvertising()
-	cancel()
+func shutdown() {
+	log.Println("📢 Sending mDNS Goodbye packet...")
+	responder.Remove(handle) // Triggers the Goodbye packet
+	cancel()                 // Context
+	os.Exit(0)
 }
 
 // startAdvertising starts an mDNS responder server to advertize
 // information about this groom's instance.
-func startAdvertising(ctx context.Context) (stop func()) {
+func startAdvertising(ctx context.Context) {
 	cfg := dnssd.Config{
 		Name:   Hostname,
 		Type:   "_groom._tcp",
@@ -72,12 +84,12 @@ func startAdvertising(ctx context.Context) (stop func()) {
 		log.Fatalf("Failed to create mDNS service: %v", err)
 	}
 
-	responder, err := dnssd.NewResponder()
+	responder, err = dnssd.NewResponder()
 	if err != nil {
 		log.Fatalf("Failed to create mDNS responder: %v", err)
 	}
 
-	handle, err := responder.Add(service)
+	handle, err = responder.Add(service)
 	if err != nil {
 		log.Fatalf("Failed to add service to responder: %v", err)
 	}
@@ -88,11 +100,6 @@ func startAdvertising(ctx context.Context) (stop func()) {
 			log.Println("mDNS Responder stopped:", err)
 		}
 	}()
-
-	return func() {
-		log.Println("📢 Sending mDNS Goodbye packet...")
-		responder.Remove(handle) // Triggers the Goodbye packet
-	}
 }
 
 // --- mDNS LISTENING (The Watchdog) ---
@@ -105,7 +112,7 @@ func watchForConcierge(ctx context.Context) {
 	// This will handle query retransmission and listen for unsolicited announcements (multicast).
 	go func() {
 		// LookupType blocks until ctx is canceled.
-		if err := dnssd.LookupType(ctx, "_concierge._tcp", addConcierge, func(dnssd.BrowseEntry) {}); err != nil {
+		if err := dnssd.LookupType(ctx, "_concierge._tcp.local.", addConcierge, func(dnssd.BrowseEntry) {}); err != nil {
 			// Only log real errors, not context cancellation
 			if ctx.Err() == nil {
 				log.Printf("❌ mDNS lookup failed: %v", err)
@@ -117,6 +124,8 @@ func watchForConcierge(ctx context.Context) {
 func addConcierge(entry dnssd.BrowseEntry) {
 	targetVer := entry.Text["target_version"]
 	downloadUrl := entry.Text["url"]
+	log.Printf("📢 Concierge advertised targetVersion=%q CurrentVersion=%q url=%q", targetVer, CurrentVersion, downloadUrl)
+	log.Printf("📢 Concierge advertised txt=%v", entry.Text)
 
 	// Check if we need to update
 	if targetVer != "" && targetVer != CurrentVersion {
@@ -181,14 +190,8 @@ func performSelfUpdate(url string) {
 		return
 	}
 
-	// Restart Systemd
-	log.Println("✅ Binary replaced. Triggering Systemd restart...")
-	cmd := exec.Command("systemctl", "restart", "groom")
-	if err := cmd.Run(); err != nil {
-		log.Printf("❌ Systemd restart failed: %v", err)
-		// Usually if this fails, we exit anyway and let systemd restart us as crashed
-		os.Exit(0)
-	}
-
-	os.Exit(0)
+	// Shutdown, we assume that someone (systemd?) is responsible for
+	// restarting the (new) program.
+	log.Println("✅ Binary replaced. Exiting to force restart...")
+	shutdown() // turn down properly the groom
 }
