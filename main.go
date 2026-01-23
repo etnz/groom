@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -20,6 +21,9 @@ const (
 var (
 	// CurrentVersion const value is actually injected by the release process.
 	CurrentVersion = "v0.0.1"
+	// BinaryName contains the fully qualified binary exposed in Github. e.g. "groom-linux-arm64"
+	// the download URL will be https://github.com/etnz/groom/releases/download/${Version}/${BinaryName}
+	BinaryName = "unknown"
 	// Hostname is set at init using the localhost name.
 	Hostname string
 )
@@ -123,9 +127,17 @@ func watchForConcierge(ctx context.Context) {
 
 func addConcierge(entry dnssd.BrowseEntry) {
 	targetVer := entry.Text["target_version"]
-	downloadUrl := entry.Text["url"]
-	log.Printf("📢 Concierge advertised targetVersion=%q CurrentVersion=%q url=%q", targetVer, CurrentVersion, downloadUrl)
-	log.Printf("📢 Concierge advertised txt=%v", entry.Text)
+
+	// If no version is advertised, we can't do anything
+	if targetVer == "" {
+		return
+	}
+
+	// Construct the download URL based on convention
+	// Pattern: https://github.com/etnz/groom/releases/download/${Version}/${BinaryName}
+	downloadUrl := fmt.Sprintf("https://github.com/etnz/groom/releases/download/%s/%s", targetVer, BinaryName)
+
+	log.Printf("📢 Concierge advertised targetVersion=%q (Current: %q) => Download URL: %q", targetVer, CurrentVersion, downloadUrl)
 
 	// Check if we need to update
 	if targetVer != "" && targetVer != CurrentVersion {
