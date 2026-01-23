@@ -1,0 +1,61 @@
+name: Build & Publish Groom
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to create the Release
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Get Version
+        id: version
+        run: |
+          # Generate version based on git tag/hash (e.g., v0.0.1-4-g8a2b3c)
+          echo "BUILD_VERSION=$(git describe --tags --always --dirty)" >> $GITHUB_ENV
+
+      - name: Build Binaries
+        run: |
+          # Build flags: strip debug symbols (-w -s) and inject version
+          # main.CurrentVersion MUST be available in the main.
+          LDFLAGS="-w -s -X main.CurrentVersion=${{ env.BUILD_VERSION }}"
+          
+          mkdir -p dist
+          
+          echo "Building for Linux AMD64..."
+          GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/groom-linux-amd64 main.go
+          
+          echo "Building for Linux ARM64..."
+          GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/groom-linux-arm64 main.go
+
+      # Upload as a build artifact (accessible via GitHub UI)
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: groom-binaries
+          path: dist/
+
+      # Publish to "Edge" Release (Rolling Release)
+      # Updates the 'edge' tag on every commit to master
+      - name: Publish Edge Release
+        uses: marvinpinto/action-automatic-releases@latest
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          automatic_release_tag: "edge"
+          prerelease: true
+          title: "Edge Build (${{ env.BUILD_VERSION }})"
+          files: |
+            dist/groom-linux-amd64
+            dist/groom-linux-arm64

@@ -12,8 +12,8 @@ import (
 
 // Configuration Constants
 const (
+    // CurrentVersion const value is actually injected by the release process.
 	CurrentVersion = "v0.0.1"
-	HTTPPort       = 8080
 	ServiceName    = "Groom-Agent"
 )
 
@@ -53,7 +53,6 @@ func startAdvertising(ctx context.Context) (stop func()){
 		Name:   Hostname,
 		Type:   "_groom._tcp",
 		Domain: "local",
-		Port:   HTTPPort,
 		Text: map[string]string{
 			"version": CurrentVersion,
 			"status":  "idle",
