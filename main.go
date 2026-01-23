@@ -12,13 +12,15 @@ import (
 
 // Configuration Constants
 const (
-	ServiceName    = "Groom-Agent"
+	ServiceName = "Groom-Agent"
 )
-var(
-    // CurrentVersion const value is actually injected by the release process.
+
+var (
+	// CurrentVersion const value is actually injected by the release process.
 	CurrentVersion = "v0.0.1"
-    // Hostname is set at init using the localhost name.
- Hostname string
+	// Hostname is set at init using the localhost name.
+	Hostname string
+)
 
 func init() {
 	var err error
@@ -43,18 +45,18 @@ func main() {
 	<-sig
 	log.Println("👋 Shutdown signal received. Goodbye.")
 
-    stopAdvertising()
+	stopAdvertising()
 	cancel()
 }
 
 // startAdvertising starts an mDNS responder server to advertize
 // information about this groom's instance.
-func startAdvertising(ctx context.Context) (stop func()){
+func startAdvertising(ctx context.Context) (stop func()) {
 	cfg := dnssd.Config{
 		Name:   Hostname,
 		Type:   "_groom._tcp",
 		Domain: "local",
-        Port: 80,
+		Port:   80,
 		Text: map[string]string{
 			"version": CurrentVersion,
 			"status":  "idle",
@@ -84,7 +86,7 @@ func startAdvertising(ctx context.Context) (stop func()){
 	}()
 
 	return func() {
-        log.Println("📢 Sending mDNS Goodbye packet...")
+		log.Println("📢 Sending mDNS Goodbye packet...")
 		responder.Remove(handle) // Triggers the Goodbye packet
-    }
+	}
 }
