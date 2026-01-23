@@ -20,10 +20,10 @@ const (
 
 var (
 	// CurrentVersion const value is actually injected by the release process.
-	CurrentVersion = "v0.0.1"
+	CurrentVersion = "v0.0.0"
 	// BinaryName contains the fully qualified binary exposed in Github. e.g. "groom-linux-arm64"
 	// the download URL will be https://github.com/etnz/groom/releases/download/${Version}/${BinaryName}
-	BinaryName = "unknown"
+	BinaryName = "groom-linux-amd64"
 	// Hostname is set at init using the localhost name.
 	Hostname string
 )
