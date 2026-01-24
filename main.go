@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -19,25 +20,85 @@ import (
 	"github.com/brutella/dnssd"
 )
 
-// listenAddr is the TCP address to bind to (e.g. ":8080" or "192.168.1.50:80").
-// It can be overridden by the GROOM_ADDR environment variable.
-var listenAddr = ":8080"
-
-// CurrentVersion is injected at build time
-var CurrentVersion = "v0.0.1"
-
-const (
-	// Directory where .deb files are stored
-	PoolDir = "/var/lib/groom/pool"
+// Configuration variables
+var (
+	listenAddr     = ":8080"
+	CurrentVersion = "v0.0.1"
+	// SelfPackageName defines the name of the package that contains Groom itself
+	// to prevent accidental self-deletion during purge.
+	SelfPackageName = "groom-agent"
 )
 
+const (
+	PoolDir      = "/var/lib/groom/pool"
+	InstalledDir = "/var/lib/groom/installed"
+)
+
+// Template for the installer script executed via systemd-run
+const installerScriptTemplate = `#!/bin/bash
+set -u
+
+POOL_FILE="%s"
+TARGET_FILE="%s"
+CURRENT_FILE="%s"
+BACKUP_FILE="%s"
+
+log() { echo "[Groom-Installer] $1"; }
+
+log "Starting installation of $(basename "$POOL_FILE")"
+
+# Backup existing installed file if it exists
+if [ -n "$CURRENT_FILE" ] && [ -f "$CURRENT_FILE" ]; then
+  log "Backing up existing version $(basename "$CURRENT_FILE") to $(basename "$BACKUP_FILE")"
+  mv "$CURRENT_FILE" "$BACKUP_FILE"
+fi
+
+# Attempt installation
+log "Running apt-get install..."
+# We use apt-get install to handle dependencies resolution if needed
+if apt-get install -y "$POOL_FILE"; then
+  log "Installation successful."
+  
+  # Commit: Move pool file to installed location (Source of Truth)
+  log "Committing: Moving pool file to installed cache"
+  mv "$POOL_FILE" "$TARGET_FILE"
+  
+  # Cleanup backup
+  if [ -n "$BACKUP_FILE" ] && [ -f "$BACKUP_FILE" ]; then
+    log "Removing backup file"
+    rm "$BACKUP_FILE"
+  fi
+  
+  log "SUCCESS"
+  exit 0
+else
+  log "Installation failed."
+  
+  # Rollback
+  if [ -n "$BACKUP_FILE" ] && [ -f "$BACKUP_FILE" ]; then
+    log "Rolling back: Re-installing previous version"
+    if apt-get install -y "$BACKUP_FILE"; then
+      log "Rollback installation successful."
+      log "Restoring backup file to active position"
+      mv "$BACKUP_FILE" "$CURRENT_FILE"
+    else
+      log "FATAL: Rollback failed."
+      exit 1
+    fi
+  else
+    log "No backup to rollback to (or first install). System might be in inconsistent state."
+  fi
+  
+  exit 1
+fi
+`
+
 func main() {
-	// Support GROOM_ADDR to bind to a specific VIP or interface
 	if addr := os.Getenv("GROOM_ADDR"); addr != "" {
 		listenAddr = addr
 	}
 
-	// Extract port for mDNS advertising
+	// Extract port for mDNS
 	_, portStr, err := net.SplitHostPort(listenAddr)
 	if err != nil {
 		if strings.HasPrefix(listenAddr, ":") {
@@ -50,226 +111,337 @@ func main() {
 
 	log.Printf("🎩 Groom Agent started on %s", listenAddr)
 
-	// Ensure pool directory exists
-	if err := os.MkdirAll(PoolDir, 0755); err != nil {
-		log.Fatalf("Failed to create pool directory: %v", err)
-	}
+	// Ensure directories exist
+	os.MkdirAll(PoolDir, 0755)
+	os.MkdirAll(InstalledDir, 0755)
 
-	// Setup Handlers
-	http.HandleFunc("/pool/", handlePool) // Handles /pool/{filename} and /pool/
+	// Handlers
+	http.HandleFunc("/pool/", handlePool)
+	http.HandleFunc("/installed/", handleInstalled)
 	http.HandleFunc("/health", handleHealth)
 
 	server := &http.Server{Addr: listenAddr}
 
-	// 1. Start mDNS Advertising
+	// mDNS
 	stopAdvertising := startAdvertising(port)
 
-	// 2. Start HTTP Server
+	// HTTP Server
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %v", err)
 		}
 	}()
 
-	// 3. Wait for Shutdown Signal
+	// Signal Handling
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
-	log.Println("👋 Shutdown signal received. Stopping services...")
-
-	// 4. Graceful Shutdown
+	log.Println("👋 Shutdown signal received.")
 	stopAdvertising()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("HTTP Shutdown error: %v", err)
-	}
-
-	log.Println("🛑 Groom stopped gracefully.")
+	server.Shutdown(ctx)
+	log.Println("🛑 Groom stopped.")
 }
 
-func handlePool(w http.ResponseWriter, r *http.Request) {
-	// Extract filename from path: /pool/filename.deb -> filename.deb
-	// If path is just /pool/, filename will be empty
-	filename := strings.TrimPrefix(r.URL.Path, "/pool/")
+// --- INSTALLED HANDLERS ---
+
+func handleInstalled(w http.ResponseWriter, r *http.Request) {
+	// Path: /installed/{filename}
+	// If path is just /installed/, filename is empty
+	arg := strings.TrimPrefix(r.URL.Path, "/installed/")
 
 	switch r.Method {
+	case http.MethodGet:
+		if arg == "" {
+			listInstalled(w, r)
+		} else {
+			http.Error(w, "Not implemented", http.StatusNotImplemented)
+		}
 	case http.MethodPost:
-		if filename == "" {
-			http.Error(w, "Filename required in path", http.StatusBadRequest)
+		// POST /installed/filename.deb -> Install from pool
+		if arg == "" {
+			http.Error(w, "Filename required", http.StatusBadRequest)
 			return
 		}
-		handlePoolUpload(w, r, filename)
-
+		installPackage(w, r, arg)
 	case http.MethodDelete:
-		if filename == "" {
-			handlePoolPurge(w, r)
+		if arg == "" {
+			purgeInstalled(w, r)
 		} else {
-			handlePoolDelete(w, r, filename)
+			removePackage(w, r, arg)
 		}
-
-	case http.MethodGet:
-		if filename == "" {
-			handlePoolList(w, r)
-		} else {
-			http.Error(w, "Single file download not implemented yet", http.StatusNotImplemented)
-		}
-
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-// GET /pool/
-func handlePoolList(w http.ResponseWriter, r *http.Request) {
-	files, err := os.ReadDir(PoolDir)
+func listInstalled(w http.ResponseWriter, r *http.Request) {
+	files, err := os.ReadDir(InstalledDir)
 	if err != nil {
-		fail(w, "Failed to read pool directory", err)
+		fail(w, "Failed to read installed dir", err)
+		return
+	}
+	var list []string
+	for _, f := range files {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ".deb") {
+			list = append(list, f.Name())
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
+// installPackage handles the transaction of installing a deb from the pool via systemd-run
+func installPackage(w http.ResponseWriter, r *http.Request, poolFilename string) {
+	// Basic security check: ensure filename doesn't contain path traversal
+	if filepath.Base(poolFilename) != poolFilename {
+		http.Error(w, "Invalid filename", http.StatusBadRequest)
 		return
 	}
 
-	var filenames []string
+	sourcePath := filepath.Join(PoolDir, poolFilename)
+	if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+		http.Error(w, "File not found in pool", http.StatusNotFound)
+		return
+	}
+
+	// Identify Package Name to find potential conflicts/upgrades
+	pkgName, err := getPackageName(sourcePath)
+	if err != nil {
+		fail(w, "Invalid deb file", err)
+		return
+	}
+
+	// Paths configuration
+	// 1. Target: The pool filename (preserving version) inside installed dir
+	targetDeb := filepath.Join(InstalledDir, poolFilename)
+
+	// 2. Current: Use helper to find the existing file for this package (e.g. version 1.0)
+	currentDeb := findInstalledPackage(pkgName)
+
+	// 3. Backup: The location to store the current file during update
+	backupDeb := ""
+	if currentDeb != "" {
+		backupDeb = currentDeb + ".previous"
+	}
+
+	// Generate the ephemeral installer script
+	scriptContent := fmt.Sprintf(installerScriptTemplate, sourcePath, targetDeb, currentDeb, backupDeb)
+	scriptPath := filepath.Join(os.TempDir(), fmt.Sprintf("groom_install_%s.sh", pkgName))
+
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+		fail(w, "Failed to create installer script", err)
+		return
+	}
+
+	// Construct a unique unit name for systemd-run
+	unitName := fmt.Sprintf("groom-install-%s", pkgName)
+
+	log.Printf("🚀 Launching detached installation for %s (unit: %s)...", pkgName, unitName)
+
+	// Launch via systemd-run
+	cmd := exec.Command("systemd-run",
+		"--unit="+unitName,
+		"--description=Groom Service Installer Worker for "+pkgName,
+		"--service-type=oneshot",
+		// Allow the script to live even if groom dies (which happens during self-update)
+		"--collect",
+		scriptPath,
+	)
+
+	if output, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("❌ Failed to launch installer: %s", string(output))
+		http.Error(w, fmt.Sprintf("Failed to schedule installation: %s", string(output)), http.StatusInternalServerError)
+		return
+	}
+
+	// Return 202 Accepted because the operation continues in background
+	w.WriteHeader(http.StatusAccepted)
+	fmt.Fprintf(w, "Installation scheduled. Monitor journalctl -u %s", unitName)
+}
+
+// findInstalledPackage scans the installed directory to find a deb file matching the package name
+func findInstalledPackage(pkgName string) string {
+	files, err := os.ReadDir(InstalledDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		log.Printf("Failed to read installed directory: %v", err)
+		return ""
+	}
+
 	for _, f := range files {
-		if !f.IsDir() {
-			filenames = append(filenames, f.Name())
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ".deb") {
+			path := filepath.Join(InstalledDir, f.Name())
+			name, err := getPackageName(path)
+			if err == nil && name == pkgName {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
+// removePackage uninstalls a package
+func removePackage(w http.ResponseWriter, r *http.Request, filename string) {
+	// filename is expected to be the .deb filename in installed folder
+	// We need to resolve the package name from it first
+
+	installedPath := filepath.Join(InstalledDir, filename)
+	if _, err := os.Stat(installedPath); os.IsNotExist(err) {
+		http.Error(w, "File not found in installed", http.StatusNotFound)
+		return
+	}
+
+	pkgName, err := getPackageName(installedPath)
+	if err != nil {
+		fail(w, "Failed to read package info", err)
+		return
+	}
+
+	// Prevent suicide: do not allow removing the agent itself
+	if pkgName == SelfPackageName {
+		http.Error(w, "Cannot remove groom agent itself via API", http.StatusForbidden)
+		return
+	}
+
+	log.Printf("🗑️ Removing %s...", pkgName)
+	cmd := exec.Command("apt-get", "remove", "-y", pkgName)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fail(w, fmt.Sprintf("Remove failed: %s", string(out)), err)
+		return
+	}
+
+	// Remove record from installed
+	os.Remove(installedPath)
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Removed %s", pkgName)
+}
+
+// purgeInstalled removes all packages except Groom
+func purgeInstalled(w http.ResponseWriter, r *http.Request) {
+	files, err := os.ReadDir(InstalledDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "Purged 0 packages")
+			return
+		}
+		fail(w, "Read dir failed", err)
+		return
+	}
+
+	count := 0
+	for _, f := range files {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ".deb") {
+			fullPath := filepath.Join(InstalledDir, f.Name())
+			pkgName, err := getPackageName(fullPath)
+			if err != nil {
+				log.Printf("Skipping unreadable file %s", f.Name())
+				continue
+			}
+
+			// Protect Groom
+			if pkgName == SelfPackageName {
+				continue
+			}
+
+			log.Printf("🔥 Purging %s...", pkgName)
+			// Purge to remove config files too
+			exec.Command("apt-get", "purge", "-y", pkgName).Run()
+			os.Remove(fullPath)
+			count++
 		}
 	}
 
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Purged %d packages", count)
+}
+
+// --- POOL HANDLERS (Simplified) ---
+
+func handlePool(w http.ResponseWriter, r *http.Request) {
+	filename := strings.TrimPrefix(r.URL.Path, "/pool/")
+	switch r.Method {
+	case http.MethodPost:
+		if filename == "" {
+			http.Error(w, "Filename required", http.StatusBadRequest)
+			return
+		}
+		uploadPool(w, r, filename)
+	case http.MethodGet:
+		listPool(w)
+	case http.MethodDelete:
+		if filename == "" {
+			os.RemoveAll(PoolDir)
+			os.MkdirAll(PoolDir, 0755)
+			w.WriteHeader(200)
+		} else {
+			os.Remove(filepath.Join(PoolDir, filename))
+			w.WriteHeader(200)
+		}
+	}
+}
+
+func listPool(w http.ResponseWriter) {
+	files, _ := os.ReadDir(PoolDir)
+	var list []string
+	for _, f := range files {
+		if !f.IsDir() {
+			list = append(list, f.Name())
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(filenames); err != nil {
-		fail(w, "Failed to encode response", err)
-	}
+	json.NewEncoder(w).Encode(list)
 }
 
-// POST /pool/{filename}
-func handlePoolUpload(w http.ResponseWriter, r *http.Request, filename string) {
-	// Basic security check: ensure filename doesn't contain path traversal
-	if filepath.Base(filename) != filename {
-		http.Error(w, "Invalid filename", http.StatusBadRequest)
-		return
-	}
-
-	// Ensure it looks like a debian package (basic check)
-	if !strings.HasSuffix(filename, ".deb") {
-		http.Error(w, "Only .deb files allowed", http.StatusBadRequest)
-		return
-	}
-
-	targetPath := filepath.Join(PoolDir, filename)
-	log.Printf("📥 Receiving %s...", filename)
-
-	// Create directory if it doesn't exist
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-		fail(w, "Failed to create directory", err)
-		return
-	}
-
-	// Create/Overwrite file
-	file, err := os.Create(targetPath)
-	if err != nil {
-		fail(w, "Failed to create file", err)
-		return
-	}
-	defer file.Close()
-
-	size, err := io.Copy(file, r.Body)
-	if err != nil {
-		fail(w, "Failed to write file", err)
-		return
-	}
-
-	w.WriteHeader(http.StatusCreated)
-	fmt.Fprintf(w, "Uploaded %s (%d bytes)", filename, size)
-}
-
-// DELETE /pool/{filename}
-func handlePoolDelete(w http.ResponseWriter, r *http.Request, filename string) {
+func uploadPool(w http.ResponseWriter, r *http.Request, filename string) {
+	path := filepath.Join(PoolDir, filename)
 	// Basic security check
 	if filepath.Base(filename) != filename {
-		http.Error(w, "Invalid filename", http.StatusBadRequest)
+		http.Error(w, "Invalid filename", 400)
 		return
 	}
-
-	targetPath := filepath.Join(PoolDir, filename)
-	log.Printf("🗑️ Deleting %s...", filename)
-
-	err := os.Remove(targetPath)
-	if err != nil && !os.IsNotExist(err) {
-		fail(w, "Failed to delete file", err)
+	f, err := os.Create(path)
+	if err != nil {
+		fail(w, "Create failed", err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	if os.IsNotExist(err) {
-		fmt.Fprintf(w, "File %s was already deleted", filename)
-	} else {
-		fmt.Fprintf(w, "Deleted %s", filename)
-	}
+	defer f.Close()
+	io.Copy(f, r.Body)
+	w.WriteHeader(201)
 }
 
-// DELETE /pool/
-func handlePoolPurge(w http.ResponseWriter, r *http.Request) {
-	log.Println("🔥 Purging entire pool...")
+// --- HELPERS ---
 
-	// Re-create the directory to empty it safely
-	if err := os.RemoveAll(PoolDir); err != nil {
-		fail(w, "Failed to purge pool", err)
-		return
+func getPackageName(debPath string) (string, error) {
+	// dpkg-deb -f file Package
+	out, err := exec.Command("dpkg-deb", "-f", debPath, "Package").Output()
+	if err != nil {
+		return "", err
 	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Pool purged"))
+	return strings.TrimSpace(string(out)), nil
 }
 
 func startAdvertising(port int) func() {
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "groom-unknown"
-	}
-
+	hostname, _ := os.Hostname()
 	cfg := dnssd.Config{
 		Name:   hostname,
 		Type:   "_groom._tcp",
 		Domain: "local",
 		Port:   port,
-		Text: map[string]string{
-			"version": CurrentVersion,
-			"status":  "healthy",
-		},
+		Text:   map[string]string{"version": CurrentVersion},
 	}
-
-	service, err := dnssd.NewService(cfg)
-	if err != nil {
-		log.Printf("mDNS Service init failed: %v", err)
-		return func() {}
-	}
-
-	responder, err := dnssd.NewResponder()
-	if err != nil {
-		log.Printf("mDNS Responder init failed: %v", err)
-		return func() {}
-	}
-
-	handle, err := responder.Add(service)
-	if err != nil {
-		log.Printf("mDNS Registration failed: %v", err)
-		return func() {}
-	}
-
-	go func() {
-		if err := responder.Respond(context.Background()); err != nil {
-			log.Println("mDNS Responder stopped:", err)
-		}
-	}()
-
-	log.Printf("📢 mDNS Advertising active for %s on port %d", hostname, port)
-
-	return func() {
-		log.Println("📢 Sending mDNS Goodbye packet...")
-		responder.Remove(handle)
-	}
+	service, _ := dnssd.NewService(cfg)
+	responder, _ := dnssd.NewResponder()
+	handle, _ := responder.Add(service)
+	go responder.Respond(context.Background())
+	return func() { responder.Remove(handle) }
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
