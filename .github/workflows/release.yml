@@ -6,75 +6,53 @@ on:
       - "master"
       - "main"
     tags:
-      - "v*" # Triggers on tags like v1.0.0, v2.1.3-rc1
+      - "v*"
+
+permissions:
+  contents: write # Needed to upload releases
 
 jobs:
-  build-and-release:
+  goreleaser:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Required for git describe if needed
+          fetch-depth: 0 # Important for GoReleaser to calculate git history
 
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.21'
 
-      # Determine the version string to inject into the binary
-      - name: Determine Version
-        id: get_version
-        run: |
-          if [[ $GITHUB_REF == refs/tags/* ]]; then
-            # If triggered by a tag, use the tag name (e.g., v1.0.0)
-            VERSION=${GITHUB_REF#refs/tags/}
-            echo "IS_STABLE=true" >> $GITHUB_ENV
-          else
-            # If triggered by master, use a dev version string
-            VERSION="edge-$(git describe --always --dirty)"
-            echo "IS_STABLE=false" >> $GITHUB_ENV
-          fi
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          echo "Detected version: ${VERSION}"
-
-      - name: Build Binaries
-        run: |
-          # Inject the determined version into the main.CurrentVersion variable
-          LDFLAGS="-w -s -X main.CurrentVersion=${{ env.VERSION }}"
-          
-          mkdir -p dist
-          
-          echo "Building for Linux AMD64..."
-              GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS -X main.BinaryName=groom-linux-amd64" -o dist/groom-linux-amd64 main.go
-          
-          echo "Building for Linux ARM64 (Raspberry Pi)..."
-          GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS -X main.BinaryName=groom-linux-arm64" -o dist/groom-linux-arm64 main.go
-
-      # CASE 1: Stable Release (Tag)
-      # Uses softprops/action-gh-release to create a persistent release with notes
-      - name: Publish Stable Release
-        if: env.IS_STABLE == 'true'
-        uses: softprops/action-gh-release@v1
+      # Run GoReleaser for TAGS (Stable)
+      - name: Run GoReleaser (Release)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: goreleaser/goreleaser-action@v5
         with:
-          files: dist/*
-          generate_release_notes: true
-          draft: false
-          prerelease: false
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # CASE 2: Edge Release (Master)
-      # Uses marvinpinto/action-automatic-releases to overwrite the 'edge' tag
-      - name: Publish Edge Release
-        if: env.IS_STABLE == 'false'
-        uses: marvinpinto/action-automatic-releases@latest
+      # Run GoReleaser for MASTER (Snapshot/Edge)
+      # Builds binaries and debs but does not publish to GitHub Releases page
+      - name: Run GoReleaser (Snapshot)
+        if: startsWith(github.ref, 'refs/heads/')
+        uses: goreleaser/goreleaser-action@v5
         with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: "edge"
-          prerelease: true
-          title: "Edge Build (${{ env.VERSION }})"
-          files: |
-            dist/groom-linux-amd64
-            dist/groom-linux-arm64
+          distribution: goreleaser
+          version: latest
+          args: release --snapshot --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Upload Edge Artifacts (Optional)
+      # Makes the snapshot .deb available in GitHub Actions Artifacts tab
+      - name: Upload Snapshot Artifacts
+        if: startsWith(github.ref, 'refs/heads/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: groom-edge-builds
+          path: dist/*.deb

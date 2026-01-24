@@ -1,0 +1,56 @@
+version: 1
+
+project_name: groom
+
+builds:
+  - id: groom
+    binary: groom
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    # Optimization flags
+    ldflags:
+      - -s -w
+      - -X main.CurrentVersion={{.Version}}
+
+
+# This section generates the .deb
+# TODO: add support for apk later
+nfpms:
+  - id: groom-host-pkg
+    package_name: groom
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: "Eric Atienza"
+    homepage: "https://github.com/etnz/groom"
+    maintainer: "Eric <eric@tnz.fr>"
+    description: "Groom Service Agent"
+    license: "BSD"
+    formats:
+      - deb
+    
+    # Dependencies managed by apt
+    dependencies:
+      - systemd
+      - iproute2
+      - curl
+
+    # Where to put files in the .deb
+    contents:
+      - src: "deploy/groom.service"
+        dst: "/etc/systemd/system/groom.service"
+        type: "config"
+
+    # Lifecycle scripts to manage the systemd daemon
+    scripts:
+      postinstall: "deploy/postinst.sh"
+      preremove: "deploy/prerm.sh"
+
+# Publish settings
+release:
+  github:
+    owner: etnz
+    name: groom
+  draft: false
+  prerelease: auto # If tag contains 'rc', marks as prerelease
