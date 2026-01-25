@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -122,7 +123,7 @@ func (s *Server) handleInstalled(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				if os.IsNotExist(err) {
 					http.Error(w, "File not found in installed", http.StatusNotFound)
-				} else if err.Error() == "forbidden" {
+				} else if errors.Is(err, ErrForbidden) {
 					http.Error(w, "Cannot remove groom agent itself via API", http.StatusForbidden)
 				} else {
 					s.fail(w, fmt.Sprintf("Remove failed: %v", err), err)

@@ -51,10 +51,19 @@ func (s *Server) Start() {
 			portStr = "8080"
 		}
 	}
-	port, _ := strconv.Atoi(portStr)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		log.Printf("Could not parse port from '%s', using default 8080", portStr)
+		port = 8080
+	}
 
 	// Start mDNS advertising
-	s.stopAdvertising = s.startAdvertisingOp(port)
+	closer, err := s.startAdvertisingOp(port)
+	if err != nil {
+		log.Printf("Failed to start mDNS advertising: %v", err)
+	} else {
+		s.stopAdvertising = closer
+	}
 
 	// Setup HTTP Server
 	mux := http.NewServeMux()

@@ -13,6 +13,8 @@ import (
 	"github.com/brutella/dnssd"
 )
 
+var ErrForbidden = fmt.Errorf("forbidden")
+
 // Template for the installer script executed via systemd-run
 const installerScriptTemplate = `#!/bin/bash
 set -u
@@ -24,28 +26,28 @@ BACKUP_FILE="%s"
 
 log() { echo "[Groom-Installer] $1"; }
 
-log "Starting installation of $(basename "")"
+log "Starting installation of $(basename "$POOL_FILE")"
 
 # Backup existing installed file if it exists
-if [ -n "" ] && [ -f "" ]; then
-  log "Backing up existing version $(basename "") to $(basename "")"
-  mv "" ""
+if [ -n "$CURRENT_FILE" ] && [ -f "$CURRENT_FILE" ]; then
+  log "Backing up existing version $(basename "$CURRENT_FILE") to $(basename "$BACKUP_FILE")"
+  mv "$CURRENT_FILE" "$BACKUP_FILE"
 fi
 
 # Attempt installation
 log "Running apt-get install..."
 # We use apt-get install to handle dependencies resolution if needed
-if apt-get install -y ""; then
+if apt-get install -y "$POOL_FILE"; then
   log "Installation successful."
   
   # Commit: Move pool file to installed location (Source of Truth)
   log "Committing: Moving pool file to installed cache"
-  mv "" ""
+  mv "$POOL_FILE" "$TARGET_FILE"
   
   # Cleanup backup
-  if [ -n "" ] && [ -f "" ]; then
+  if [ -n "$BACKUP_FILE" ] && [ -f "$BACKUP_FILE" ]; then
     log "Removing backup file"
-    rm ""
+    rm "$BACKUP_FILE"
   fi
   
   log "SUCCESS"
@@ -54,12 +56,12 @@ else
   log "Installation failed."
   
   # Rollback
-  if [ -n "" ] && [ -f "" ]; then
+  if [ -n "$BACKUP_FILE" ] && [ -f "$BACKUP_FILE" ]; then
     log "Rolling back: Re-installing previous version"
-    if apt-get install -y ""; then
+    if apt-get install -y "$BACKUP_FILE"; then
       log "Rollback installation successful."
       log "Restoring backup file to active position"
-      mv "" ""
+      mv "$BACKUP_FILE" "$CURRENT_FILE"
     else
       log "FATAL: Rollback failed."
       exit 1
@@ -72,8 +74,11 @@ else
 fi
 `
 
-func (s *Server) startAdvertisingOp(port int) func() {
-	hostname, _ := os.Hostname()
+func (s *Server) startAdvertisingOp(port int) (func(), error) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get hostname: %w", err)
+	}
 	cfg := dnssd.Config{
 		Name:   hostname,
 		Type:   "_groom._tcp",
@@ -81,11 +86,20 @@ func (s *Server) startAdvertisingOp(port int) func() {
 		Port:   port,
 		Text:   map[string]string{"version": s.cfg.Version},
 	}
-	service, _ := dnssd.NewService(cfg)
-	responder, _ := dnssd.NewResponder()
-	handle, _ := responder.Add(service)
+	service, err := dnssd.NewService(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service: %w", err)
+	}
+	responder, err := dnssd.NewResponder()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create responder: %w", err)
+	}
+	handle, err := responder.Add(service)
+	if err != nil {
+		return nil, fmt.Errorf("failed to add service to responder: %w", err)
+	}
 	go responder.Respond(context.Background())
-	return func() { responder.Remove(handle) }
+	return func() { responder.Remove(handle) }, nil
 }
 
 func (s *Server) listPoolOp() ([]string, error) {
@@ -201,7 +215,7 @@ func (s *Server) removePackageOp(filename string) (string, error) {
 
 	// Prevent suicide: do not allow removing the agent itself
 	if pkgName == s.cfg.SelfPackageName {
-		return "", fmt.Errorf("forbidden")
+		return "", ErrForbidden
 	}
 
 	log.Printf("🗑️ Removing %s...", pkgName)
@@ -241,7 +255,11 @@ func (s *Server) purgeInstalledOp() (int, error) {
 
 			log.Printf("🔥 Purging %s...", pkgName)
 			// Purge to remove config files too
-			exec.Command("apt-get", "purge", "-y", pkgName).Run()
+			cmd := exec.Command("apt-get", "purge", "-y", pkgName)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("Failed to purge package %s: %s", pkgName, string(out))
+				continue
+			}
 			os.Remove(fullPath)
 			count++
 		}
