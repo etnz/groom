@@ -16,18 +16,20 @@ var (
 	CurrentVersion = "v0.0.1"
 	// SelfPackageName defines the name of the package that contains Groom itself
 	// to prevent accidental self-deletion during purge.
-	SelfPackageName = "groom-agent"
+	SelfPackageName = "groom"
 )
 
 const (
 	PoolDir      = "/var/lib/groom/pool"
 	InstalledDir = "/var/lib/groom/installed"
+	StateDir     = "/var/lib/groom"
 )
 
 func main() {
 	if addr := os.Getenv("GROOM_ADDR"); addr != "" {
 		listenAddr = addr
 	}
+	// The StateDir will be used by the new executor package.
 
 	cfg := daemon.Config{
 		ListenAddr:      listenAddr,
