@@ -165,7 +165,7 @@ func TestFSM_FailurePaths(t *testing.T) {
 		failureReason error
 	}{
 		{"RolledBack", StatePrepare, fmt.Errorf("apt failed")},
-		{"Broken", StateBroken, fmt.Errorf("rollback also failed")},
+		{"Broken", StateDone, fmt.Errorf("rollback also failed")},
 	}
 
 	for _, tc := range testCases {

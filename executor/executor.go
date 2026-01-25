@@ -22,8 +22,6 @@ const (
 	StateRun State = "Run"
 	// StateDone means the operations are complete.
 	StateDone State = "Done"
-	// StateBroken means the operations failed and rollback also failed. The value is "Failed" for historical reasons.
-	StateBroken State = "Failed"
 )
 
 const (
@@ -82,12 +80,7 @@ func (t *Operations) InProgress() bool {
 
 // Err returns the last execution error.
 // It returns an error if the state is Broken, or if an error is set from a previous run.
-func (o *Operations) Err() error {
-	if o.err == nil && o.state == StateBroken {
-		return fmt.Errorf("operations finished in state %s with no specific error", o.state)
-	}
-	return o.err
-}
+func (o *Operations) Err() error { return o.err }
 
 // ConsumerStore provides a safe API for the Groom daemon to interact with the
 // operations file. Its methods use short-lived locks and fail if the
@@ -174,7 +167,7 @@ func (e *ExecutorStore) Broken(err error) (*Operations, error) {
 	if err == nil {
 		return nil, errors.New("Broken requires a non-nil error")
 	}
-	return e.updateState(StateBroken, err)
+	return e.updateState(StateDone, err)
 }
 
 // store handles the persistence and lifecycle of operations on disk.
