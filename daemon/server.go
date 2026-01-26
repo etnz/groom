@@ -2,12 +2,15 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/etnz/groom/executor"
 )
 
 // Config holds the configuration parameters for the Daemon Server.
@@ -17,6 +20,7 @@ type Config struct {
 	SelfPackageName string
 	PoolDir         string
 	InstalledDir    string
+	StateDir        string
 }
 
 // Server represents the daemon service agent.
@@ -24,13 +28,19 @@ type Server struct {
 	cfg             Config
 	httpServer      *http.Server
 	stopAdvertising func()
+	executorStore   *executor.ConsumerStore
 }
 
 // New creates a new Server instance with the provided configuration.
-func New(cfg Config) *Server {
-	return &Server{
-		cfg: cfg,
+func New(cfg Config) (*Server, error) {
+	store, err := executor.NewConsumerStore(cfg.StateDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create executor store: %w", err)
 	}
+	return &Server{
+		cfg:           cfg,
+		executorStore: store,
+	}, nil
 }
 
 // Start initializes resources and starts the background services (HTTP, mDNS).

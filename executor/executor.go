@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -27,6 +28,10 @@ const (
 const (
 	// lockPollInterval is the duration between attempts to acquire a file lock.
 	lockPollInterval = 100 * time.Millisecond
+	// maxRetries is the number of times to attempt a critical state mutation.
+	maxRetries = 5
+	// retryDelay is the duration to wait between retries.
+	retryDelay = 200 * time.Millisecond
 )
 
 // ErrExecutionInProgress is returned when a modification is attempted on operations that are not in the Prepare state.
@@ -56,6 +61,13 @@ func (t *Operations) Remove(packageName string) {
 		}
 	}
 	t.remove = append(t.remove, packageName)
+}
+
+// Clear removes all staged installations and removals from the plan.
+func (t *Operations) Clear() {
+	t.install = make([]string, 0)
+	t.remove = make([]string, 0)
+	t.err = nil
 }
 
 // State returns the operations's current state.
@@ -142,32 +154,70 @@ func NewExecutorStore(baseDir string) (*ExecutorStore, error) {
 	return &ExecutorStore{s}, nil
 }
 
+// Start transitions the operations state from Prepare to Run.
+// It fails if the current state is not Prepare.
+// It must be called while holding the operations lock.
+func (e *ExecutorStore) Start() (*Operations, error) {
+	ops, err := e.Operations()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load operations to start: %w", err)
+	}
+
+	if ops.State() != StatePrepare {
+		// Return ops so the caller can see the current state. Not a retryable error.
+		return ops, fmt.Errorf("cannot start, current state is '%s'", ops.State())
+	}
+
+	var updatedOps *Operations
+	err = e.withRetry(func() error {
+		var updateErr error
+		updatedOps, updateErr = e.updateState(StateRun, nil)
+		return updateErr
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to transition to Run state: %w", err)
+	}
+	return updatedOps, nil
+}
+
 // Done sets the operations state to Done.
 // It must be called while holding the operations lock.
 func (e *ExecutorStore) Done() error {
-	_, err := e.updateState(StateDone, nil)
-	return err
+	return e.withRetry(func() error {
+		_, err := e.updateState(StateDone, nil)
+		return err
+	})
 }
 
 // RolledBack sets the operations state to Prepare and records the error that
 // caused the rollback. The provided error must not be nil.
 // It must be called while holding the operations lock.
-func (e *ExecutorStore) RolledBack(err error) error {
-	if err == nil {
-		err = errors.New("RolledBack with no error")
+func (e *ExecutorStore) RolledBack(errInfo error) error {
+	if errInfo == nil {
+		errInfo = errors.New("RolledBack with no error")
 	}
-	_, err = e.updateState(StatePrepare, err)
-	return err
+	return e.withRetry(func() error {
+		// TODO: you are using "withRetry" for all the calls to updateState, therefore it should be there ;-)
+		_, err := e.updateState(StatePrepare, errInfo)
+		return err
+	})
 }
 
 // Broken sets the operations state to Broken and records the error.
 // The provided error must not be nil.
 // It must be called while holding the operations lock.
-func (e *ExecutorStore) Broken(err error) (*Operations, error) {
-	if err == nil {
+func (e *ExecutorStore) Broken(errInfo error) (*Operations, error) {
+	if errInfo == nil {
 		return nil, errors.New("Broken requires a non-nil error")
 	}
-	return e.updateState(StateDone, err)
+	var ops *Operations
+	err := e.withRetry(func() error {
+		var innerErr error
+		ops, innerErr = e.updateState(StateDone, errInfo)
+		return innerErr
+	})
+	return ops, err
 }
 
 // store handles the persistence and lifecycle of operations on disk.
@@ -176,6 +226,33 @@ type store struct {
 	stateFile string
 	lockFile  string
 	fileLock  *flock.Flock
+}
+
+// withRetry attempts an action multiple times if it fails.
+// This is used for critical state file mutations.
+// TODO: consider exponential backoff and jitter, this is the state of art.
+func (e *ExecutorStore) withRetry(action func() error) error {
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		lastErr = action()
+		if lastErr == nil {
+			return nil // Success
+		}
+		log.Printf("State mutation failed (attempt %d/%d): %v. Retrying in %v...", i+1, maxRetries, lastErr, retryDelay)
+		time.Sleep(retryDelay)
+	}
+	return fmt.Errorf("state mutation failed after %d retries: %w", maxRetries, lastErr)
+}
+
+// Lock acquires an exclusive, blocking lock on behalf of the executor.
+// It respects the provided context for cancellation.
+func (e *ExecutorStore) Lock(ctx context.Context) error {
+	return e.store.lock(ctx)
+}
+
+// Unlock releases the file lock.
+func (e *ExecutorStore) Unlock() error {
+	return e.store.unlock()
 }
 
 // newStore creates a new operations store.
@@ -343,4 +420,34 @@ func (s *store) updateState(newState State, errInfo error) (*Operations, error) 
 	ops.state, ops.err = newState, errInfo
 
 	return ops, s.persist(ops)
+}
+
+// Run performs the executor's main logic: locking, running, and finalizing operations.
+// This is intended to be called by the main groom binary when the --execute flag is present.
+func Run(stateDir string) error {
+	log.Println("Executor process started.")
+	execStore, err := NewExecutorStore(stateDir)
+	if err != nil {
+		return fmt.Errorf("failed to create executor store: %w", err)
+	}
+
+	ops, err := execStore.Start()
+	if err != nil {
+		if ops != nil {
+			log.Printf("Operations not in Prepare state (state is '%s'), aborting.", ops.State())
+		} else {
+			log.Printf("Failed to start operations, could not load plan: %v", err)
+		}
+		return nil // Not a fatal error for the executor process itself.
+	}
+
+	log.Println("Executor faking a successful run...")
+	time.Sleep(1 * time.Second) // Simulate work
+
+	if err := execStore.Done(); err != nil {
+		return fmt.Errorf("CRITICAL: failed to finalize operations state: %w", err)
+	}
+
+	log.Println("Executor finished.")
+	return nil
 }

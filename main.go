@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"flag"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/etnz/groom/daemon"
+	"github.com/etnz/groom/executor"
 )
 
 // Configuration variables
@@ -18,6 +21,7 @@ var (
 	// to prevent accidental self-deletion during purge.
 	SelfPackageName = "groom"
 )
+var execute = flag.Bool("execute", false, "Run the executor logic instead of the daemon")
 
 const (
 	PoolDir      = "/var/lib/groom/pool"
@@ -26,10 +30,18 @@ const (
 )
 
 func main() {
+	flag.Parse()
+
+	if *execute {
+		if err := executor.Run(StateDir); err != nil {
+			log.Fatalf("Executor failed: %v", err)
+		}
+		return // Exit after executor runs
+	}
+
 	if addr := os.Getenv("GROOM_ADDR"); addr != "" {
 		listenAddr = addr
 	}
-	// The StateDir will be used by the new executor package.
 
 	cfg := daemon.Config{
 		ListenAddr:      listenAddr,
@@ -37,9 +49,13 @@ func main() {
 		SelfPackageName: SelfPackageName,
 		PoolDir:         PoolDir,
 		InstalledDir:    InstalledDir,
+		StateDir:        StateDir,
 	}
 
-	server := daemon.New(cfg)
+	server, err := daemon.New(cfg)
+	if err != nil {
+		log.Fatalf("failed to create daemon: %v", err)
+	}
 	server.Start()
 
 	// Signal Handling
