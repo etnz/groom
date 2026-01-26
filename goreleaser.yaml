@@ -21,7 +21,6 @@ builds:
 nfpms:
   - id: groom-host-pkg
     package_name: groom
-    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: "Eric Atienza"
     homepage: "https://github.com/etnz/groom"
     maintainer: "Eric <eric@tnz.fr>"
@@ -29,23 +28,7 @@ nfpms:
     license: "BSD"
     formats:
       - deb
-    
-    # Dependencies managed by apt
-    dependencies:
-      - systemd
-      - iproute2
-      - curl
-
-    # Where to put files in the .deb
-    contents:
-      - src: "deploy/groom.service"
-        dst: "/etc/systemd/system/groom.service"
-        type: "config"
-
-    # Lifecycle scripts to manage the systemd daemon
-    scripts:
-      postinstall: "deploy/postinst.sh"
-      preremove: "deploy/prerm.sh"
+      - apk
 
 # Publish settings
 release:

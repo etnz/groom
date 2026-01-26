@@ -2,9 +2,13 @@ module github.com/etnz/groom
 
 go 1.25.5
 
-require github.com/brutella/dnssd v1.2.14
+require (
+	github.com/brutella/dnssd v1.2.14
+	github.com/grandcat/zeroconf v1.0.0
+)
 
 require (
+	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
 	github.com/miekg/dns v1.1.61 // indirect
 	github.com/vishvananda/netlink v1.2.1-beta.2 // indirect
 	github.com/vishvananda/netns v0.0.0-20200728191858-db3c7e526aae // indirect

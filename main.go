@@ -1,51 +1,29 @@
 package main
 
 import (
-	"context"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/etnz/groom/daemon"
+	"github.com/grandcat/zeroconf"
 )
 
-// Configuration variables
-var (
-	listenAddr     = ":8080"
-	CurrentVersion = "v0.0.1"
-	// SelfPackageName defines the name of the package that contains Groom itself
-	// to prevent accidental self-deletion during purge.
-	SelfPackageName = "groom-agent"
-)
-
-const (
-	PoolDir      = "/var/lib/groom/pool"
-	InstalledDir = "/var/lib/groom/installed"
-)
+// Defined by the build system.
+var CurrentVersion = "v0.0.1"
 
 func main() {
-	if addr := os.Getenv("GROOM_ADDR"); addr != "" {
-		listenAddr = addr
+	server, err := zeroconf.Register("groom-service", "_groom._tcp", "local.", 8080, nil, nil)
+	if err != nil {
+		log.Fatalf("Failed to register mDNS service: %v", err)
 	}
+	defer server.Shutdown()
 
-	cfg := daemon.Config{
-		ListenAddr:      listenAddr,
-		Version:         CurrentVersion,
-		SelfPackageName: SelfPackageName,
-		PoolDir:         PoolDir,
-		InstalledDir:    InstalledDir,
-	}
-
-	server := daemon.New(cfg)
-	server.Start()
-
+	log.Println("mDNS responder started. Press Ctrl+C to exit.")
 	// Signal Handling
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	server.Stop(ctx)
+	log.Println("Shutting down.")
 }
