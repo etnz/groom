@@ -16,19 +16,17 @@ builds:
       - -X main.CurrentVersion={{.Version}}
 
 
-# This section generates the .deb
-# TODO: add support for apk later
+# This section generates the debian packages
 nfpms:
-  - id: groom-host-pkg
-    package_name: groom
-    vendor: "Eric Atienza"
+  - id: pbc-groom-bin
+    package_name: pbc-groom-bin
+    vendor: "Le Concierge"
     homepage: "https://github.com/etnz/groom"
-    maintainer: "Eric <eric@tnz.fr>"
-    description: "Groom Service Agent"
+    maintainer: "Le Concierge <petitbijou.caussade@gmail.com>"
+    description: "Groom's Binary"
     license: "BSD"
     formats:
       - deb
-      - apk
 
 # Publish settings
 release:
