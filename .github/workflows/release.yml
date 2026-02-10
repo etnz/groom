@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - master
 
 permissions:
   contents: write # Needed to upload releases
@@ -17,10 +19,13 @@ jobs:
         with:
           fetch-depth: 0 # Important for GoReleaser to calculate git history
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.21'
+      - name: Update Edge Tag
+        if: github.ref == 'refs/heads/master'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f edge
+          git push origin edge --force
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v5
